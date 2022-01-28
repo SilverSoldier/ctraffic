@@ -15,9 +15,11 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/signal"
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	rndip "github.com/Nordix/mconnect/pkg/rndip/v2"
@@ -104,7 +106,7 @@ func main() {
 		os.Exit(cmd.analyzeMain())
 	} else if *cmd.isServer {
 		if *cmd.udp {
-			os.Exit(cmd.udpServerMain())
+			go cmd.udpServerMain()
 		}
 		os.Exit(cmd.serverMain())
 	} else {
@@ -261,7 +263,6 @@ type connData struct {
 	started          time.Time
 	connected        time.Time
 	ended            time.Time
-	nFailedConnect   uint
 	local            string
 	remote           string
 	localAddr        net.Addr
@@ -281,6 +282,8 @@ func (c *config) clientMain() int {
 
 	deadline := time.Now().Add(*c.timeout)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	ctx, cancel = signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	if *c.srccidr != "" {
@@ -391,6 +394,12 @@ func (c *config) client(ctx context.Context, wg *sync.WaitGroup, s *statistics) 
 		err := conn.Connect(ctx, *c.addr)
 		for err != nil {
 			time.Sleep(backoff)
+			if ctx.Err() != nil {
+				// Interrupt or timeout
+				cd.ended = s.Started.Add(s.Duration)
+				s.failedConnect(1)
+				return
+			}
 			if backoff < time.Second {
 				backoff += 100 * time.Millisecond
 			}
@@ -398,7 +407,7 @@ func (c *config) client(ctx context.Context, wg *sync.WaitGroup, s *statistics) 
 				cd.ended = s.Started.Add(s.Duration)
 				return
 			}
-			cd.nFailedConnect++
+			s.failedConnect(1)
 			err = conn.Connect(ctx, *c.addr)
 		}
 		cd.connected = time.Now()
@@ -538,6 +547,7 @@ func (c *config) serverMain() int {
 		log.Fatal(err)
 	}
 	defer l.Close()
+	log.Println("Listen on address; ", *c.addr)
 
 	for {
 		conn, err := l.Accept()
@@ -583,7 +593,7 @@ type statistics struct {
 	Received          uint32
 	Dropped           uint32
 	Retransmits       uint32
-	FailedConnects    uint
+	FailedConnects    uint32
 	ConnStats         []connstats `json:",omitempty"`
 	Samples           []sample    `json:",omitempty"`
 }
@@ -639,6 +649,9 @@ func (s *statistics) dropped(n uint32) {
 func (s *statistics) failedConnection(n uint32) {
 	atomic.AddUint32(&s.FailedConnections, n)
 }
+func (s *statistics) failedConnect(n uint32) {
+	atomic.AddUint32(&s.FailedConnects, n)
+}
 
 func (s *statistics) reportStats() {
 	s.Duration = time.Now().Sub(s.Started)
@@ -663,16 +676,14 @@ func readStats(r io.Reader) (*statistics, error) {
 	return &s, nil
 }
 
-
 // ----------------------------------------------------------------------
 // UDP
-
 
 func (c *config) udpServerMain() int {
 	serverAddr, err := net.ResolveUDPAddr("udp", *c.addr)
 	if err != nil {
 		log.Fatal(err)
-	}	
+	}
 	conn, err := net.ListenUDP("udp", serverAddr)
 	if err != nil {
 		log.Fatal(err)
@@ -683,7 +694,12 @@ func (c *config) udpServerMain() int {
 		log.Fatal(err)
 	}
 
-	buf := make([]byte, 64 * 1024)
+	host, err := os.Hostname()
+	if err != nil {
+		host = ""
+	}
+
+	buf := make([]byte, 64*1024)
 	oob := make([]byte, 2048)
 	for {
 		//n, oobn, flags, addr, err
@@ -693,14 +709,15 @@ func (c *config) udpServerMain() int {
 		}
 		oobd := oob[:oobn]
 
+		copy(buf[:], host)
+
 		n, _, err = conn.WriteMsgUDP(buf[:n], correctSource(oobd), addr)
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
-	return 0;
+	return 0
 }
-
 
 func (c *config) udpClientMain() int {
 	s := newStats(*c.timeout, *c.rate, *c.nconn, uint32(*c.psize))
@@ -738,7 +755,7 @@ func (c *config) udpClientMain() int {
 		s.reportStats()
 	}
 
-	return 0;
+	return 0
 }
 
 type udpConn struct {
@@ -779,16 +796,16 @@ func (c *config) udpClient(
 			}
 		}
 
-        daddr, err := net.ResolveUDPAddr("udp", *c.addr)
-        if err != nil {
+		daddr, err := net.ResolveUDPAddr("udp", *c.addr)
+		if err != nil {
 			log.Fatal(err)
-        }
+		}
 
-        conn, err := net.DialUDP("udp", saddr, daddr)
-        if err != nil {
+		conn, err := net.DialUDP("udp", saddr, daddr)
+		if err != nil {
 			log.Fatal(err)
-        }
-        defer conn.Close()
+		}
+		defer conn.Close()
 		cd.connected = time.Now()
 
 		udpConn := udpConn{cd, conn}
@@ -855,13 +872,12 @@ func (c *udpConn) Run(ctx context.Context, s *statistics) error {
 	return nil
 }
 
-
 /*
   Taken from;
    https://github.com/miekg/dns/blob/master/udp.go
   License;
    https://github.com/miekg/dns/blob/master/LICENSE
- */
+*/
 
 func setUDPSocketOptions(conn *net.UDPConn) error {
 	// Try setting the flags for both families and ignore the errors unless they
