@@ -508,21 +508,21 @@ func (c *echoConn) Run(ctx context.Context, s *statistics) error {
 			s.dropped(1)
 		}
 
-		if err := c.conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			return err
-		}
-		if _, err := io.ReadFull(c.conn, p); err != nil {
-			return err
-		}
-		if c.cd.nPacketsReceived == 0 {
-			// First received packet _may_ contain a hostname
-			if n := bytes.IndexByte(p, 0); n > 0 {
-				c.cd.host = string(p[:n])
-			}
-		}
+		// if err := c.conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		// 	return err
+		// }
+		// if _, err := io.ReadFull(c.conn, p); err != nil {
+		// 	return err
+		// }
+		// if c.cd.nPacketsReceived == 0 {
+		// 	// First received packet _may_ contain a hostname
+		// 	if n := bytes.IndexByte(p, 0); n > 0 {
+		// 		c.cd.host = string(p[:n])
+		// 	}
+		// }
 
-		c.cd.nPacketsReceived++
-		s.received(1)
+		// c.cd.nPacketsReceived++
+		// s.received(1)
 	}
 
 	c.cd.tcpinfo, _ = tcpinfo.GetsockoptTCPInfo(&c.conn)
@@ -554,18 +554,19 @@ func server(c net.Conn) {
 	defer c.Close()
 
 	// Insert our hostname in the first packet
-	p := make([]byte, 64)
-	if _, err := io.ReadFull(c, p); err != nil {
-		return
-	}
-	if host, err := os.Hostname(); err == nil {
-		copy(p[:], host)
-	}
-	if _, err := c.Write(p); err != nil {
-		return
-	}
+	// p := make([]byte, 1024)
+	// for {
+	//     if _, err := io.ReadFull(c, p); err != nil {
+	// 	    return
+	//     }
 
-	io.Copy(c, c)
+	//     if _, err := c.Write(s); err != nil {
+	// 	    return
+	//     }
+	// }
+		
+	io.Copy(io.Discard, c)
+	// io.Copy(c, c)
 }
 
 // ----------------------------------------------------------------------
